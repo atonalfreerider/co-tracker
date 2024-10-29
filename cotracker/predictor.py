@@ -14,7 +14,7 @@ from cotracker.models.build_cotracker import build_cotracker
 class CoTrackerPredictor(torch.nn.Module):
     def __init__(
         self,
-        checkpoint="./checkpoints/scaled_offline.pth",
+        checkpoint="checkpoints/scaled_offline.pth",
         offline=True,
         v2=False,
         window_len=60,

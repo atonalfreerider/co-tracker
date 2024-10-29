@@ -8,6 +8,7 @@ import os
 import torch
 import argparse
 import numpy as np
+import cv2
 
 from PIL import Image
 from cotracker.utils.visualizer import Visualizer, read_video_from_path
@@ -20,30 +21,51 @@ DEFAULT_DEVICE = (
 # if DEFAULT_DEVICE == "mps":
 #     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
+def select_points(frame):
+    """
+    Allow user to select points on the first frame.
+    Returns: List of (x,y) coordinates
+    """
+    points = []
+    window_name = "Select tracking points (press SPACE when done, ESC to cancel)"
+    
+    def mouse_callback(event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            points.append((x, y))
+            # Draw a small circle at clicked point
+            cv2.circle(display_frame, (x, y), 3, (0, 255, 0), -1)
+            cv2.imshow(window_name, display_frame)
+    
+    # Create a copy of the frame for display
+    display_frame = frame.copy()
+    cv2.imshow(window_name, display_frame)
+    cv2.setMouseCallback(window_name, mouse_callback)
+    
+    while True:
+        key = cv2.waitKey(1) & 0xFF
+        if key == 32:  # SPACE key to finish
+            cv2.destroyAllWindows()
+            return points
+        elif key == 27:  # ESC key to cancel
+            cv2.destroyAllWindows()
+            return None
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--video_path",
-        default="./assets/apple.mp4",
+        default=None,
         help="path to a video",
     )
     parser.add_argument(
         "--mask_path",
-        default="./assets/apple_mask.png",
+        default=None,
         help="path to a segmentation mask",
     )
     parser.add_argument(
         "--checkpoint",
-        # default="./checkpoints/cotracker.pth",
-        default=None,
+        default="checkpoints/scaled_offline.pth",
         help="CoTracker model parameters",
-    )
-    parser.add_argument("--grid_size", type=int, default=10, help="Regular grid size")
-    parser.add_argument(
-        "--grid_query_frame",
-        type=int,
-        default=0,
-        help="Compute dense and grid tracks starting from this frame",
     )
     parser.add_argument(
         "--backward_tracking",
@@ -51,59 +73,103 @@ if __name__ == "__main__":
         help="Compute tracks in both directions, not only forward",
     )
     parser.add_argument(
-        "--use_v2_model",
+        "--interactive",
         action="store_true",
-        help="Pass it if you wish to use CoTracker2, CoTracker++ is the default now",
-    )
-    parser.add_argument(
-        "--offline",
-        action="store_true",
-        help="Pass it if you would like to use the offline model, in case of online don't pass it",
+        help="Enable interactive point selection mode",
     )
 
     args = parser.parse_args()
 
-    # load the input video frame by frame
-    video = read_video_from_path(args.video_path)
-    video = torch.from_numpy(video).permute(0, 3, 1, 2)[None].float()
-    segm_mask = np.array(Image.open(os.path.join(args.mask_path)))
-    segm_mask = torch.from_numpy(segm_mask)[None, None]
+    # Check if video path is provided
+    if args.video_path is None:
+        raise ValueError("Please provide a video path using --video_path")
 
-    if args.checkpoint is not None:
-        if args.use_v2_model:
-            model = CoTrackerPredictor(checkpoint=args.checkpoint, v2=args.use_v2_model)
-        else:
-            if args.offline:
-                window_len = 60
-            else:
-                window_len = 16
-            model = CoTrackerPredictor(
-                checkpoint=args.checkpoint,
-                v2=args.use_v2_model,
-                offline=args.offline,
-                window_len=window_len,
-            )
+    # Check if video file exists
+    if not os.path.exists(args.video_path):
+        raise FileNotFoundError(f"Video file not found: {args.video_path}")
+
+    # load the input video frame by frame with error handling
+    try:
+        video = read_video_from_path(args.video_path)
+        if video is None:
+            raise ValueError(f"Failed to load video from {args.video_path}")
+        
+        video = torch.from_numpy(video).permute(0, 3, 1, 2)[None].float()
+    except Exception as e:
+        print(f"Error loading video: {str(e)}")
+        raise
+
+    if args.mask_path:
+        segm_mask = np.array(Image.open(os.path.join(args.mask_path)))
+        segm_mask = torch.from_numpy(segm_mask)[None, None]
     else:
-        model = torch.hub.load("facebookresearch/co-tracker", "cotracker3_offline")
+        segm_mask = None
+
+    model = CoTrackerPredictor(
+        checkpoint=args.checkpoint,
+        window_len=60,
+    )
 
     model = model.to(DEFAULT_DEVICE)
     video = video.to(DEFAULT_DEVICE)
 
-    pred_tracks, pred_visibility = model(
-        video,
-        grid_size=args.grid_size,
-        grid_query_frame=args.grid_query_frame,
-        backward_tracking=args.backward_tracking,
-        # segm_mask=segm_mask
-    )
+    # Convert first frame to numpy for OpenCV
+    first_frame = video[0, 0].permute(1, 2, 0).cpu().numpy()
+    first_frame = (first_frame * 255).astype(np.uint8)
+
+    # Get points from user
+    selected_points = select_points(first_frame)
+
+    if selected_points is None or len(selected_points) == 0:
+        print("No points selected. Exiting.")
+        exit()
+
+    # Convert points to queries format (t, x, y)
+    queries = torch.zeros((1, len(selected_points), 3), device=DEFAULT_DEVICE)
+    for i, (x, y) in enumerate(selected_points):
+        queries[0, i] = torch.tensor([0, x, y])
+
+    # Run tracking with selected points
+    chunk_size = 50  # Process 50 frames at a time to avoid out of memory
+    all_tracks = []
+    all_visibility = []
+    
+    for i in range(0, video.shape[1], chunk_size):
+        video_chunk = video[:, i:i + chunk_size]
+        
+        if i == 0:
+            # For the first chunk, use original queries
+            chunk_queries = queries
+        else:
+            # For subsequent chunks, use the last known positions as starting points
+            last_tracks = all_tracks[-1]
+            last_positions = last_tracks[:, -1]  # Get positions from last frame of previous chunk
+            chunk_queries = torch.zeros_like(queries)
+            chunk_queries[:, :, 0] = 0  # Set time index to 0 for new chunk
+            chunk_queries[:, :, 1:] = last_positions  # Use last known positions
+        
+        pred_tracks, pred_visibility = model(
+            video_chunk,
+            backward_tracking=args.backward_tracking,
+            segm_mask=segm_mask,
+            queries=chunk_queries
+        )
+        
+        # Store results
+        all_tracks.append(pred_tracks)
+        all_visibility.append(pred_visibility)
+    
+    # Concatenate results along time dimension
+    pred_tracks = torch.cat(all_tracks, dim=1)
+    pred_visibility = torch.cat(all_visibility, dim=1)
+
     print("computed")
 
     # save a video with predicted tracks
     seq_name = args.video_path.split("/")[-1]
-    vis = Visualizer(save_dir="./saved_videos", pad_value=120, linewidth=3)
+    vis = Visualizer(save_dir="./saved_videos", pad_value=120, linewidth=3, mode='optical_flow', tracks_leave_trace=50)
     vis.visualize(
         video,
         pred_tracks,
         pred_visibility,
-        query_frame=0 if args.backward_tracking else args.grid_query_frame,
     )

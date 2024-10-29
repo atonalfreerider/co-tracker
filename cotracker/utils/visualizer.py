@@ -11,21 +11,42 @@ import torch
 
 from matplotlib import cm
 import torch.nn.functional as F
-import torchvision.transforms as transforms
+
 import matplotlib.pyplot as plt
 from PIL import Image, ImageDraw
 
+import cv2
 
-def read_video_from_path(path):
-    try:
-        reader = imageio.get_reader(path)
-    except Exception as e:
-        print("Error opening video file: ", e)
-        return None
+
+def read_video_from_path(video_path):
+    """
+    Read a video file and return it as a numpy array.
+    Args:
+        video_path: Path to the video file
+    Returns:
+        numpy array of shape (T, H, W, C)
+    """
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"Video file not found: {video_path}")
+        
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Failed to open video file: {video_path}")
+
     frames = []
-    for i, im in enumerate(reader):
-        frames.append(np.array(im))
-    return np.stack(frames)
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frames.append(frame)
+    
+    cap.release()
+    
+    if not frames:
+        raise ValueError(f"No frames were read from the video: {video_path}")
+        
+    return np.stack(frames, axis=0)
 
 
 def draw_circle(rgb, coord, radius, color=(255, 0, 0), visible=True, color_alpha=None):
@@ -113,11 +134,6 @@ class Visualizer:
         )
         color_alpha = int(opacity * 255)
         tracks = tracks + self.pad_value
-
-        if self.grayscale:
-            transform = transforms.Grayscale()
-            video = transform(video)
-            video = video.repeat(1, 1, 3, 1, 1)
 
         res_video = self.draw_tracks_on_video(
             video=video,
@@ -266,9 +282,9 @@ class Visualizer:
                     )
 
         #  draw points
-        for t in range(T):
+        for t in range(min(T, tracks.shape[0])): # TODO might not need
             img = Image.fromarray(np.uint8(res_video[t]))
-            for i in range(N):
+            for i in range(min(N, tracks.shape[1])): # TODO might not need
                 coord = (tracks[t, i, 0], tracks[t, i, 1])
                 visibile = True
                 if visibility is not None:
