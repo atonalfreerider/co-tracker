@@ -9,6 +9,7 @@ import torch
 import argparse
 import numpy as np
 import cv2
+import json
 
 from PIL import Image
 from cotracker.utils.visualizer import Visualizer, read_video_from_path
@@ -49,6 +50,13 @@ def select_points(frame):
         elif key == 27:  # ESC key to cancel
             cv2.destroyAllWindows()
             return None
+
+def save_json(data, filepath):
+    with open(filepath, 'w') as f:
+        # Convert NumPy array to list before saving to JSON
+        if isinstance(data, np.ndarray):
+            data = data.tolist()
+        json.dump(data, f, indent=2)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -165,11 +173,8 @@ if __name__ == "__main__":
 
     print("computed")
 
-    # save a video with predicted tracks
-    seq_name = args.video_path.split("/")[-1]
-    vis = Visualizer(save_dir="./saved_videos", pad_value=120, linewidth=3, mode='optical_flow', tracks_leave_trace=50)
-    vis.visualize(
-        video,
-        pred_tracks,
-        pred_visibility,
-    )
+    save_json(pred_tracks[0].long().detach().cpu().numpy(), "/home/john/Desktop/carlos-aline-spin/cam1/pred_tracks.json")
+    save_json(pred_visibility.cpu().numpy(), "/home/john/Desktop/carlos-aline-spin/cam1/pred_visibility.json")
+
+    print("saved")
+
